@@ -130,35 +130,45 @@ class MapRefResolver(RefResolver):
     written_objects: Dict[int, Tuple[int, Any]]  # id(obj) -> (ref_id, obj)
     read_objects: List[Any]
     read_ref_ids: List[int]
+    ref_tracking: bool
 
-    def __init__(self):
+    def __init__(self, ref_tracking: bool = False):
         self.written_objects = dict()
         self.read_objects = list()
         self.read_ref_ids = list()
         self.read_object = None
+        self.ref_tracking = ref_tracking
 
     def write_ref_or_null(self, buffer, obj):
+        if not self.ref_tracking:
+            if obj is None:
+                buffer.write_int8(NULL_FLAG)
+                return True
+            else:
+                buffer.write_int8(NOT_NULL_VALUE_FLAG)
+                return False
+
         if obj is None:
             buffer.write_int8(NULL_FLAG)
             return True
+
+        object_id = id(obj)
+        written_id = self.written_objects.get(object_id, None)
+        if written_id is not None:
+            buffer.write_int8(REF_FLAG)
+            buffer.write_varuint32(written_id[0])
+            return True
         else:
-            object_id = id(obj)
-            written_id = self.written_objects.get(object_id, None)
-            # The obj has been written previously.
-            if written_id is not None:
-                buffer.write_int8(REF_FLAG)
-                buffer.write_varuint32(written_id[0])
-                return True
-            else:
-                written_id = len(self.written_objects)
-                # Hold object to avoid tmp object gc when serialize nested
-                # fields/objects.
-                self.written_objects[object_id] = (written_id, obj)
+            ref_id = len(self.written_objects)
+            self.written_objects[object_id] = (ref_id, obj)
             buffer.write_int8(REF_VALUE_FLAG)
             return False
 
     def read_ref_or_null(self, buffer):
         head_flag = buffer.read_int8()
+        if not self.ref_tracking:
+            return head_flag
+
         if head_flag == REF_FLAG:
             # read reference id and get object from reference resolver
             ref_id = buffer.read_varuint32()
@@ -169,17 +179,23 @@ class MapRefResolver(RefResolver):
             return head_flag
 
     def preserve_ref_id(self) -> int:
+        if not self.ref_tracking:
+            return -1
         next_read_ref_id = len(self.read_objects)
         self.read_objects.append(None)
         self.read_ref_ids.append(next_read_ref_id)
         return next_read_ref_id
 
     def try_preserve_ref_id(self, buffer) -> int:
+        if not self.ref_tracking:
+            return buffer.read_int8()
+
         head_flag = buffer.read_int8()
         if head_flag == REF_FLAG:
             # read reference id and get object from reference resolver
             ref_id = buffer.read_varuint32()
-            self.read_object = self.get_read_object(id_=ref_id)
+            self.read_object = self.get_read_object(ref_id)
+            return head_flag
         else:
             self.read_object = None
             if head_flag == REF_VALUE_FLAG:
@@ -189,17 +205,25 @@ class MapRefResolver(RefResolver):
         return head_flag
 
     def reference(self, obj):
+        if not self.ref_tracking:
+            return
         ref_id = self.read_ref_ids.pop()
-        self.set_read_object(ref_id, obj)
+        if self.read_objects[ref_id] is None:
+            self.read_objects[ref_id] = obj
 
     def get_read_object(self, id_=None):
+        if not self.ref_tracking:
+            return None
         if id_ is None:
             return self.read_object
         return self.read_objects[id_]
 
     def set_read_object(self, id_, obj):
+        if not self.ref_tracking:
+            return
         if id_ >= 0:
-            self.read_objects[id_] = obj
+            if self.read_objects[id_] is None:
+                self.read_objects[id_] = obj
 
     def reset(self):
         self.reset_write()
@@ -209,6 +233,8 @@ class MapRefResolver(RefResolver):
         self.written_objects.clear()
 
     def reset_read(self):
+        if not self.ref_tracking:
+            return
         self.read_objects.clear()
         self.read_ref_ids.clear()
         self.read_object = None

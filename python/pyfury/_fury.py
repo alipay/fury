@@ -135,7 +135,7 @@ class Fury:
         )
         self.ref_tracking = ref_tracking
         if self.ref_tracking:
-            self.ref_resolver = MapRefResolver()
+            self.ref_resolver = MapRefResolver(self.ref_tracking)
         else:
             self.ref_resolver = NoRefResolver()
         from pyfury._serialization import MetaStringResolver
